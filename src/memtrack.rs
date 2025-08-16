@@ -1,3 +1,4 @@
+use core::ffi::c_void;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 use core::ptr::null_mut;
@@ -13,7 +14,8 @@ pub struct MemBlockHeader {
     pub(crate) next: *mut MemBlockHeader,
     pub(crate) size: usize,
     pub(crate) flag: u32,
-    _pad: usize,
+    pub(crate) owner: *mut c_void,
+    pub(crate) map_len: usize,
 }
 
 impl MemBlockHeader {
@@ -22,9 +24,10 @@ impl MemBlockHeader {
         Self {
             prev: null_mut(),
             next: null_mut(),
+            owner: null_mut(),
             size: 0,
             flag: 0,
-            _pad: 0,
+            map_len: 0,
         }
     }
     #[inline(always)]
@@ -51,8 +54,13 @@ pub struct MemIter<'a> {
     _lt: PhantomData<&'a MemBlockHeader>,
 }
 
+pub struct MemItem {
+    pub ptr: *mut u8,
+    pub size: usize,
+}
+
 impl<'a> Iterator for MemIter<'a> {
-    type Item = (*mut u8, usize); // (ptr, size);
+    type Item = MemItem;
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         if self.cur.is_null() {
@@ -61,8 +69,11 @@ impl<'a> Iterator for MemIter<'a> {
         unsafe {
             let hdr = self.cur;
             self.cur = (*hdr).next;
-            let user = (hdr as *mut u8).add(size_of::<MemBlockHeader>());
-            Some((user, (*hdr).size))
+            let ptr = (hdr as *mut u8).add(size_of::<MemBlockHeader>());
+            Some(MemItem {
+                ptr,
+                size: (*hdr).size
+            })
         }
     }
 }

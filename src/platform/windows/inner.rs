@@ -12,7 +12,7 @@ use core::ptr::null_mut;
 pub struct WinAllocator {
     pub functions: WinApiFunctions,
     heap: Cell<HANDLE>,
-    base_alloc: BaseAllocator
+    pub base_alloc: BaseAllocator
 }
 
 impl WinAllocator {

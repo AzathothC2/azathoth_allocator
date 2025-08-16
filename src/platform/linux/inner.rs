@@ -1,17 +1,14 @@
 use crate::base::BaseAllocator;
 use crate::memtrack::{
-    header_from_ptr, ptr_from_header, MemBlockHeader, HEADER_SIZE, LARGE_THRESHOLD,
+    HEADER_SIZE, LARGE_THRESHOLD, MemBlockHeader, header_from_ptr, ptr_from_header,
 };
-use crate::platform::linux::maps::{
-    align_up, get_class, mmap, munmap, CLASS_SIZES, SPAN_BYTES,
-};
+use crate::platform::linux::maps::{CLASS_SIZES, SPAN_BYTES, align_up, get_class, mmap, munmap};
 use crate::platform::linux::{write, writenum};
-use azathoth_core::os::linux::consts::{
-    MAP_ANONYMOUS, MAP_PRIVATE, PROT_READ, PROT_WRITE,
-};
+use azathoth_core::os::linux::consts::{MAP_ANONYMOUS, MAP_PRIVATE, PROT_READ, PROT_WRITE};
 use core::alloc::Layout;
 use core::cell::UnsafeCell;
-use core::ptr::{null_mut, NonNull};
+use core::ffi::c_void;
+use core::ptr::{NonNull, null_mut};
 
 #[repr(C)]
 struct Span {
@@ -38,39 +35,6 @@ impl LinuxAllocator {
         Self {
             spans: UnsafeCell::new([null_mut(); CLASS_SLOTS]),
             base_alloc: BaseAllocator::new(),
-        }
-    }
-    unsafe fn alloc_large(&self, need: usize) -> *mut u8 {
-        let total = need + HEADER_SIZE;
-        unsafe {
-            let base = mmap(
-                null_mut(),
-                total,
-                (PROT_READ | PROT_WRITE) as usize,
-                (MAP_PRIVATE | MAP_ANONYMOUS) as u32,
-                usize::MAX,
-                0,
-            );
-            if base.is_null() {
-                write("MMAP WAS NULL");
-                return null_mut();
-            }
-            let hdr = base as *mut MemBlockHeader;
-            *hdr = MemBlockHeader::empty();
-            (*hdr).size = need;
-            (*hdr).set_large();
-            self.base_alloc.track_insert(hdr);
-            ptr_from_header(hdr)
-        }
-    }
-    #[inline(always)]
-    unsafe fn free_large(&self, hdr: *mut MemBlockHeader) {
-        unsafe {
-            self.base_alloc.track_remove(hdr);
-            self.base_alloc.record_freed(ptr_from_header(hdr), hdr);
-            (*hdr).poison();
-            let total = (*hdr).size + HEADER_SIZE;
-            let _ = munmap(hdr as _, total);
         }
     }
 
@@ -115,6 +79,7 @@ impl LinuxAllocator {
                 let hdr = p as *mut MemBlockHeader;
                 *hdr = MemBlockHeader::empty();
                 (*hdr).next = head;
+                (*hdr).owner = span as _;
                 head = hdr;
                 p = p.add(class_size);
             }
@@ -125,7 +90,10 @@ impl LinuxAllocator {
     unsafe fn span_alloc_block(&self, span: *mut Span, need: usize) -> *mut u8 {
         unsafe {
             let hdr = (*span).free_list;
-            if hdr.is_null() { return null_mut(); }
+            if hdr.is_null() {
+                write("self.span_alloc_block(): Header was null!\n");
+                return null_mut();
+            }
             (*span).free_list = (*hdr).next;
             (*span).free_count -= 1;
             (*hdr).prev = null_mut();
@@ -178,6 +146,9 @@ impl LinuxAllocator {
             }
         }
     }
+
+
+
     unsafe fn find_create_span(&self, idx: usize) -> *mut Span {
         unsafe {
             let lists = self.span_list_mut();
@@ -191,6 +162,7 @@ impl LinuxAllocator {
             let class_size = CLASS_SIZES[idx];
             let span = self.span_create(class_size);
             if span.is_null() {
+                write("self.find_create_span(): span is null\n");
                 return null_mut();
             }
             (*span).next = lists[idx];
@@ -204,12 +176,14 @@ impl LinuxAllocator {
         let total = align_up(HEADER_SIZE + need, ALIGN);
         let idx = match get_class(total) {
             Some(i) => CLASS_SIZES.iter().position(|&s| s == i).unwrap(),
-            None => return {
-                write("could not get class size of: ");
-                writenum(total as u32);
-                write("\n");
-                null_mut()
-            },
+            None => {
+                return {
+                    write("could not get class size of: ");
+                    writenum(total as u32);
+                    write("\n");
+                    null_mut()
+                };
+            }
         };
         #[cfg(feature = "multithread")]
         let _g = crate::lock::guard(&self.base_alloc.lock);
@@ -221,11 +195,76 @@ impl LinuxAllocator {
         unsafe { self.span_alloc_block(span, need) }
     }
 
+    unsafe fn alloc_large_aligned(&self, need: usize, align: usize) -> *mut u8 {
+        unsafe {
+            if !align.is_power_of_two() {
+                write("alloc_large_aligned: alignment must be power of two\n");
+                core::arch::asm!("int3", options(noreturn))
+            }
+            let required = need.saturating_add(HEADER_SIZE);
+            let over     = required.saturating_add(align); 
+
+            let raw = mmap(
+                null_mut(),
+                over,
+                (PROT_READ | PROT_WRITE) as usize,
+                (MAP_PRIVATE | MAP_ANONYMOUS) as u32,
+                usize::MAX,
+                0,
+            );
+            if raw.is_null() {
+                write("alloc_large_aligned(): mmap failed\n");
+                return null_mut();
+            }
+
+            let raw_usize  = raw as usize;
+            let user_usize = align_up(raw_usize.saturating_add(HEADER_SIZE), align);
+            let hdr_usize  = user_usize.saturating_sub(HEADER_SIZE);
+            let raw_end    = raw_usize.saturating_add(over);
+
+            if hdr_usize < raw_usize || user_usize.saturating_add(need) > raw_end {
+                write("alloc_large_aligned(): bad align window, unmapping\n");
+                let _ = munmap(raw as _, over);
+                return null_mut();
+            }
+
+            let hdr  = hdr_usize as *mut MemBlockHeader;
+            let user = user_usize as *mut u8;
+
+            *hdr = MemBlockHeader::empty();
+            (*hdr).size    = need;
+            (*hdr).set_large();
+            (*hdr).owner   = raw as *mut c_void;
+            (*hdr).map_len = over;
+
+            self.base_alloc.track_insert(hdr);
+            user
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn free_large(&self, hdr: *mut MemBlockHeader) {
+        unsafe {
+            self.base_alloc.track_remove(hdr);
+            self.base_alloc.record_freed(ptr_from_header(hdr), hdr);
+            (*hdr).poison();
+
+            let base = (*hdr).owner;
+            let len  = (*hdr).map_len;
+            if !base.is_null() && len != 0 {
+                let _ = munmap(base, len);
+            } else {
+                let total = (*hdr).size + HEADER_SIZE;
+                let _ = munmap(hdr as _, total);
+            }
+        }
+    }
     pub unsafe fn inner_alloc(&self, layout: Layout) -> NonNull<u8> {
         unsafe {
             let need = core::cmp::max(1, layout.size());
-            let ptr = if need >= LARGE_THRESHOLD {
-                self.alloc_large(need)
+            let align = layout.align();
+            let ptr = if need >= LARGE_THRESHOLD || align > ALIGN {
+                self.alloc_large_aligned(need, align)
             } else {
                 self.alloc_small(layout)
             };
@@ -244,7 +283,6 @@ impl LinuxAllocator {
             let hdr = header_from_ptr(ptr);
             if (*hdr).is_poisoned() {
                 write("Use After Free\n");
-                // UAF. just abort.
                 core::arch::asm!("int3", options(noreturn))
             }
             if (*hdr).is_large() {
@@ -252,9 +290,20 @@ impl LinuxAllocator {
                 return;
             }
 
-            let span_base = (hdr as usize) & !(SPAN_BYTES - 1);
-            let span = span_base as *mut Span;
-
+            // let span_base = (hdr as usize) & !(SPAN_BYTES - 1);
+            // let span = span_base as *mut Span;
+            let span = (*hdr).owner as *mut Span;
+            if !((*hdr).owner as *mut Span == span) {
+                write("hdr.owner != span\n");
+                core::arch::asm!("int3", options(noreturn))
+            }
+            if !hdr_in_span(span, hdr) {
+                write("hdr not in span!\n");
+                writenum((hdr as usize) as u32); write(" hdr\n");
+                writenum((*span).base as usize as u32); write(" base\n");
+                writenum(((*span).base as usize + (*span).total_slots * (*span).class_size) as u32); write(" end\n");
+                core::arch::asm!("int3", options(noreturn))
+            }
             #[cfg(feature = "multithread")]
             let _g = crate::lock::guard(&self.base_alloc.lock);
             self.span_free_block(span, hdr);
@@ -285,5 +334,17 @@ impl LinuxAllocator {
             self.inner_dealloc(ptr, layout);
             new_ptr
         }
+    }
+}
+
+unsafe fn hdr_in_span(span: *const Span, hdr: *const MemBlockHeader) -> bool {
+    unsafe {
+        if span.is_null() || hdr.is_null() {
+            return false;
+        }
+        let base = (*span).base as usize;
+        let end = base + (*span).total_slots * (*span).class_size;
+        let h = hdr as usize;
+        h >= base && (h + HEADER_SIZE) <= end && ((h - base) % (*span).class_size == 0)
     }
 }
