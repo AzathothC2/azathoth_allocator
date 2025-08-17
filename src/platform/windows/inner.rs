@@ -112,6 +112,7 @@ impl WinAllocator {
             let hdr = header_from_ptr(ptr);
             #[cfg(debug_assertions)]
             if (*hdr).is_poisoned() {
+                write("Header is poisoned!\n");
                 core::arch::asm!("int3", options(noreturn))
             }
             self.base_alloc.track_remove(hdr);

@@ -1,6 +1,6 @@
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
-use crate::memtrack::{FreedBuffer, MemTracker};
+use crate::metadata::{FreedBuffer, MemTracker};
 use crate::platform::InnerAllocator;
 
 pub struct Api {

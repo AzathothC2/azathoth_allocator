@@ -1,5 +1,5 @@
-use azathoth_core::os::Current::consts::{SYS_MMAP, SYS_MREMAP, SYS_MUNMAP};
-use azathoth_core::os::Current::syscalls::{syscall2, syscall5, syscall6};
+use azathoth_core::os::Current::consts::{SYS_MMAP, SYS_MUNMAP};
+use azathoth_core::os::Current::syscalls::{syscall2, syscall6};
 
 pub const SPAN_BYTES: usize = 256 * 1024;
 

@@ -1,7 +1,7 @@
 use core::cell::UnsafeCell;
 use core::ptr::null_mut;
 use crate::{MAX_RECORDS};
-use crate::memtrack::{FreedBuffer, FreedRecord, MemBlockHeader, MemTracker};
+use crate::metadata::{FreedBuffer, FreedRecord, MemBlockHeader, MemTracker};
 
 pub(crate) struct BaseAllocator {
     pub tracker: UnsafeCell<MemTracker>,
@@ -22,8 +22,8 @@ impl BaseAllocator {
     #[inline(always)]
     pub unsafe fn track_insert(&self, hdr: *mut MemBlockHeader) {
         unsafe {
-            #[cfg(feature = "multithread")]
-            let _g = crate::lock::guard(&self.lock);
+            // #[cfg(feature = "multithread")]
+            // let _g = self.lock.guard();
 
             let list = &mut *self.tracker.get();
             (*hdr).prev = null_mut();
@@ -38,8 +38,8 @@ impl BaseAllocator {
     #[inline(always)]
     pub unsafe fn track_remove(&self, hdr: *mut MemBlockHeader) {
         unsafe {
-            #[cfg(feature = "multithread")]
-            let _g = crate::lock::guard(&self.lock);
+            // #[cfg(feature = "multithread")]
+            // let _g = self.lock.guard();
 
             let list = &mut *self.tracker.get();
             let prev = (*hdr).prev;
@@ -61,6 +61,8 @@ impl BaseAllocator {
     #[inline(always)]
     pub unsafe fn record_freed(&self, user: *mut u8, hdr: *mut MemBlockHeader) {
         unsafe {
+            // #[cfg(feature = "multithread")]
+            // let _g = self.lock.guard();
             let rec = FreedRecord {
                 ptr: user,
                 size: (*hdr).size,

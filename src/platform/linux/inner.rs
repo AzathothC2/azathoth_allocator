@@ -1,5 +1,5 @@
 use crate::base::BaseAllocator;
-use crate::memtrack::{
+use crate::metadata::{
     HEADER_SIZE, LARGE_THRESHOLD, MemBlockHeader, header_from_ptr, ptr_from_header,
 };
 use crate::platform::linux::maps::{CLASS_SIZES, SPAN_BYTES, align_up, get_class, mmap, munmap};
@@ -125,10 +125,6 @@ impl LinuxAllocator {
             let class_size = (*dead).class_size;
             let idx = CLASS_SIZES.iter().position(|&s| s == class_size).unwrap();
             let lists = self.span_list_mut();
-
-            #[cfg(feature = "multithread")]
-            let _g = crate::lock::guard(&self.base_alloc.lock);
-
             let mut cur = lists[idx];
             let mut prev: *mut Span = null_mut();
             while !cur.is_null() {
@@ -146,8 +142,6 @@ impl LinuxAllocator {
             }
         }
     }
-
-
 
     unsafe fn find_create_span(&self, idx: usize) -> *mut Span {
         unsafe {
@@ -185,8 +179,6 @@ impl LinuxAllocator {
                 };
             }
         };
-        #[cfg(feature = "multithread")]
-        let _g = crate::lock::guard(&self.base_alloc.lock);
         let span = unsafe { self.find_create_span(idx) };
         if span.is_null() {
             write("span is null\n");
@@ -202,7 +194,7 @@ impl LinuxAllocator {
                 core::arch::asm!("int3", options(noreturn))
             }
             let required = need.saturating_add(HEADER_SIZE);
-            let over     = required.saturating_add(align); 
+            let over = required.saturating_add(align);
 
             let raw = mmap(
                 null_mut(),
@@ -217,10 +209,10 @@ impl LinuxAllocator {
                 return null_mut();
             }
 
-            let raw_usize  = raw as usize;
+            let raw_usize = raw as usize;
             let user_usize = align_up(raw_usize.saturating_add(HEADER_SIZE), align);
-            let hdr_usize  = user_usize.saturating_sub(HEADER_SIZE);
-            let raw_end    = raw_usize.saturating_add(over);
+            let hdr_usize = user_usize.saturating_sub(HEADER_SIZE);
+            let raw_end = raw_usize.saturating_add(over);
 
             if hdr_usize < raw_usize || user_usize.saturating_add(need) > raw_end {
                 write("alloc_large_aligned(): bad align window, unmapping\n");
@@ -228,13 +220,13 @@ impl LinuxAllocator {
                 return null_mut();
             }
 
-            let hdr  = hdr_usize as *mut MemBlockHeader;
+            let hdr = hdr_usize as *mut MemBlockHeader;
             let user = user_usize as *mut u8;
 
             *hdr = MemBlockHeader::empty();
-            (*hdr).size    = need;
+            (*hdr).size = need;
             (*hdr).set_large();
-            (*hdr).owner   = raw as *mut c_void;
+            (*hdr).owner = raw as *mut c_void;
             (*hdr).map_len = over;
 
             self.base_alloc.track_insert(hdr);
@@ -250,7 +242,7 @@ impl LinuxAllocator {
             (*hdr).poison();
 
             let base = (*hdr).owner;
-            let len  = (*hdr).map_len;
+            let len = (*hdr).map_len;
             if !base.is_null() && len != 0 {
                 let _ = munmap(base, len);
             } else {
@@ -260,6 +252,13 @@ impl LinuxAllocator {
         }
     }
     pub unsafe fn inner_alloc(&self, layout: Layout) -> NonNull<u8> {
+        #[cfg(feature = "multithread")]
+        let _g = self.base_alloc.lock.guard();
+        unsafe { self.do_alloc(layout) }
+
+    }
+
+    unsafe fn do_alloc(&self, layout: Layout) -> NonNull<u8> {
         unsafe {
             let need = core::cmp::max(1, layout.size());
             let align = layout.align();
@@ -276,6 +275,12 @@ impl LinuxAllocator {
     }
 
     pub unsafe fn inner_dealloc(&self, ptr: *mut u8, _layout: Layout) {
+        #[cfg(feature = "multithread")]
+        let _g = self.base_alloc.lock.guard();
+        unsafe { self.do_dealloc(ptr, _layout) }
+    }
+
+    unsafe fn do_dealloc(&self, ptr: *mut u8, _layout: Layout) {
         unsafe {
             if ptr.is_null() {
                 return;
@@ -290,8 +295,6 @@ impl LinuxAllocator {
                 return;
             }
 
-            // let span_base = (hdr as usize) & !(SPAN_BYTES - 1);
-            // let span = span_base as *mut Span;
             let span = (*hdr).owner as *mut Span;
             if !((*hdr).owner as *mut Span == span) {
                 write("hdr.owner != span\n");
@@ -299,22 +302,18 @@ impl LinuxAllocator {
             }
             if !hdr_in_span(span, hdr) {
                 write("hdr not in span!\n");
-                writenum((hdr as usize) as u32); write(" hdr\n");
-                writenum((*span).base as usize as u32); write(" base\n");
-                writenum(((*span).base as usize + (*span).total_slots * (*span).class_size) as u32); write(" end\n");
+                writenum((hdr as usize) as u32);
+                write(" hdr\n");
+                writenum((*span).base as usize as u32);
+                write(" base\n");
+                writenum(((*span).base as usize + (*span).total_slots * (*span).class_size) as u32);
+                write(" end\n");
                 core::arch::asm!("int3", options(noreturn))
             }
-            #[cfg(feature = "multithread")]
-            let _g = crate::lock::guard(&self.base_alloc.lock);
             self.span_free_block(span, hdr);
         }
     }
-    pub unsafe fn inner_realloc(
-        &self,
-        ptr: *mut u8,
-        layout: Layout,
-        new_size: usize,
-    ) -> NonNull<u8> {
+    unsafe fn do_realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> NonNull<u8> {
         unsafe {
             if new_size == 0 {
                 self.inner_dealloc(ptr, layout);
@@ -333,6 +332,18 @@ impl LinuxAllocator {
             );
             self.inner_dealloc(ptr, layout);
             new_ptr
+        }
+    }
+    pub unsafe fn inner_realloc(
+        &self,
+        ptr: *mut u8,
+        layout: Layout,
+        new_size: usize,
+    ) -> NonNull<u8> {
+        unsafe {
+            #[cfg(feature = "multithread")]
+            let _g = self.base_alloc.lock.guard();
+            self.do_realloc(ptr, layout, new_size)
         }
     }
 }

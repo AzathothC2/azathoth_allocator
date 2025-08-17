@@ -12,11 +12,28 @@ impl Lock {
     }
 
     #[inline]
+    pub fn try_lock(&self) -> bool {
+        self.inner
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+    }
+    #[inline]
     pub fn lock(&self) {
-        while self.inner.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        let mut spins = 0u32;
+        while self.inner.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+            spins += 1;
             core::hint::spin_loop();
+            if spins >= 64 {
+                spins = 0;
+            }
         }
     }
+
+    pub fn guard(&self) -> LockGuard<'_> {
+        self.lock();
+        LockGuard(self)
+    }
+
     #[inline] pub fn unlock(&self) { self.inner.store(false, Ordering::Release); }
 }
 
