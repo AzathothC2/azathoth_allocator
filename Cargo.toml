@@ -1,6 +1,6 @@
 [package]
 name = "azathoth_allocator"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Main allocator used for the AzathothC2 platform"
 repository = "https://github.com/AzathothC2/azathoth_allocator"

@@ -1,13 +1,13 @@
 use crate::base::BaseAllocator;
-use crate::memtrack::{header_from_ptr, ptr_from_header, MemBlockHeader, LARGE_THRESHOLD};
 use crate::platform::windows::mem::WinApiFunctions;
 use azathoth_core::os::windows::consts::{MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE};
 use azathoth_core::os::windows::types::DWORD;
 use azathoth_core::os::Current::types::HANDLE;
-use core::alloc::{GlobalAlloc, Layout};
+use core::alloc::Layout;
 use core::cell::Cell;
 use core::ffi::c_void;
 use core::ptr::null_mut;
+use crate::metadata::{header_from_ptr, ptr_from_header, MemBlockHeader, LARGE_THRESHOLD};
 
 pub struct WinAllocator {
     pub functions: WinApiFunctions,
@@ -112,8 +112,7 @@ impl WinAllocator {
             let hdr = header_from_ptr(ptr);
             #[cfg(debug_assertions)]
             if (*hdr).is_poisoned() {
-                write("Header is poisoned!\n");
-                core::arch::asm!("int3", options(noreturn))
+                panic!("Header is poisoned!\n");
             }
             self.base_alloc.track_remove(hdr);
             self.base_alloc.record_freed(ptr, hdr);

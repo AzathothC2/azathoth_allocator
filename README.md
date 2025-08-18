@@ -7,8 +7,12 @@ The main allocator in use by the [AzathothC2](https://github.com/AzathothC2/) be
 > like: `1607423093` bytes
 
 ## Installation
-* Manually, via `Cargo.toml`: `azathoth_allocator = "0.1.0"`
+* Manually, via `Cargo.toml`: `azathoth_allocator = "0.1.1"`
 * Using the `cargo` cli: `cargo add azathoth_allocator`
+
+## Changelog
+* 0.1.0: Initial code commit
+* 0.1.1: Fixed windows broken import
 
 ## License
 MIT
